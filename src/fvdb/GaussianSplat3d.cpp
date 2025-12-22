@@ -1,6 +1,7 @@
 // Copyright Contributors to the OpenVDB Project
 // SPDX-License-Identifier: Apache-2.0
 //
+#include "fvdb/detail/utils/Utils.h"
 #include <fvdb/GaussianSplat3d.h>
 #include <fvdb/detail/autograd/GaussianRasterizeSparse.h>
 #include <fvdb/detail/io/GaussianPlyIO.h>
@@ -375,21 +376,50 @@ GaussianSplat3d::projectGaussiansImpl(const torch::Tensor &worldToCameraMatrices
     // Intersect projected Gaussians with image tiles [non-differentiable]
     const int numTilesW = std::ceil(settings.imageWidth / static_cast<float>(settings.tileSize));
     const int numTilesH = std::ceil(settings.imageHeight / static_cast<float>(settings.tileSize));
-    // const int64_t T = tilesToRender.has_value() ? tilesToRender->size(1) : numTilesH * numTilesW;
+    const bool isTileSparse = tilesToRender.has_value();
     
-    const auto [tileOffsets, tileGaussianIds] = FVDB_DISPATCH_KERNEL(mMeans.device(), [&]() {
-        return detail::ops::dispatchGaussianTileIntersection<DeviceTag>(ret.perGaussian2dMean,
-                                                                        ret.perGaussianRadius,
-                                                                        ret.perGaussianDepth,
-                                                                        at::nullopt,
-                                                                        C,
-                                                                        settings.tileSize,
-                                                                        numTilesH,
-                                                                        numTilesW);
-    });
-    ret.tileOffsets                           = tileOffsets;     // [C, TH, TW]
-    ret.tileGaussianIds                       = tileGaussianIds; // [TOT_INTERSECTIONS]
+    if (isTileSparse) {
+        
+        // const int64_t T = tilesToRender->size(1); // [C, T, 2]
+        torch::Tensor cameraIds = torch::arange(C, mMeans.options().dtype(torch::kInt32));
+        torch::Tensor tileMask = torch::zeros({C, numTilesH, numTilesW}, mMeans.options().dtype(torch::kBool));
+        auto tileY = tilesToRender->select(2, 0);
+        auto tileX = tilesToRender->select(2, 1);
+        torch::Tensor activeTiles = (cameraIds.unsqueeze(1) * (numTilesH * numTilesW) + tileY * numTilesW + tileX).flatten().to(torch::kUInt32); // [C * T]
+        
+        tileMask.index_put_(
+            {cameraIds.unsqueeze(1), tileY, tileX},
+            true
+        );
 
+        const auto [tileOffsets, tileGaussianIds] = FVDB_DISPATCH_KERNEL_DEVICE(mMeans.device(), [&]() {
+            return detail::ops::dispatchGaussianTileIntersectionSparse<DeviceTag>(ret.perGaussian2dMean,
+                                                                            ret.perGaussianRadius,
+                                                                            ret.perGaussianDepth,
+                                                                            tileMask,
+                                                                            activeTiles,
+                                                                            at::nullopt,
+                                                                            C,
+                                                                            settings.tileSize,
+                                                                            numTilesH,
+                                                                            numTilesW);
+        });
+        ret.tileOffsets                           = tileOffsets;     // [C, TH, TW]
+        ret.tileGaussianIds                       = tileGaussianIds; // [TOT_INTERSECTIONS]
+    } else {
+        const auto [tileOffsets, tileGaussianIds] = FVDB_DISPATCH_KERNEL(mMeans.device(), [&]() {
+            return detail::ops::dispatchGaussianTileIntersection<DeviceTag>(ret.perGaussian2dMean,
+                                                                            ret.perGaussianRadius,
+                                                                            ret.perGaussianDepth,
+                                                                            at::nullopt,
+                                                                            C,
+                                                                            settings.tileSize,
+                                                                            numTilesH,
+                                                                            numTilesW);
+        });
+        ret.tileOffsets                           = tileOffsets;     // [C, TH, TW]
+        ret.tileGaussianIds                       = tileGaussianIds; // [TOT_INTERSECTIONS]
+    }
     return ret;
 }
 
