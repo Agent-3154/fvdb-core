@@ -978,6 +978,42 @@ class GaussianSplat3d {
                                 const float eps2d                   = 0.3,
                                 const bool antialias                = false);
 
+    /// @brief Render images by specifying which tiles to render for each camera.
+    /// Renders only the specified tiles, returning regular tensors [C, T, tile_size, tile_size, D].
+    /// @param tilesToRender [C, T, 2] Tensor of tile coordinates (tile_y, tile_x) for each camera.
+    ///                      T must be the same for all cameras.
+    /// @param worldToCameraMatrices [C, 4, 4] Camera-to-world transformation matrices
+    /// @param projectionMatrices [C, 3, 3] Projection matrices
+    /// @param imageWidth Width of the images
+    /// @param imageHeight Height of the images
+    /// @param near Near clipping plane distance
+    /// @param far Far clipping plane distance
+    /// @param projectionType Type of projection (PERSPECTIVE or ORTHOGRAPHIC)
+    /// @param shDegreeToUse Degree of spherical harmonics to use (-1 means use all available)
+    /// @param tileSize Size of tiles used for rendering
+    /// @param minRadius2d Minimum radius in pixels below which Gaussians are ignored
+    /// @param eps2d Epsilon value for 2D projection padding
+    /// @param antialias Whether to apply antialiasing
+    /// @param backgrounds Optional [C, D] tensor of background colors per camera
+    /// @return Tuple of two tensors:
+    ///     images: [C, T, tile_size, tile_size, D] - rendered tile images
+    ///     alphas: [C, T, tile_size, tile_size, 1] - alpha values for each tile
+    std::tuple<torch::Tensor, torch::Tensor>
+    tileSparseRenderImages(const torch::Tensor &tilesToRender,
+                           const torch::Tensor &worldToCameraMatrices,
+                           const torch::Tensor &projectionMatrices,
+                           const size_t imageWidth,
+                           const size_t imageHeight,
+                           const float near,
+                           const float far,
+                           const ProjectionType projectionType = ProjectionType::PERSPECTIVE,
+                           const int64_t shDegreeToUse         = -1,
+                           const size_t tileSize               = 16,
+                           const float minRadius2d             = 0.0,
+                           const float eps2d                   = 0.3,
+                           const bool antialias                = false,
+                           const std::optional<torch::Tensor> &backgrounds = std::nullopt);
+
     /// @brief Render the number of contributing Gaussians for each pixel in the image.
     /// @param worldToCameraMatrices [C, 4, 4] Camera-to-world matrices
     /// @param projectionMatrices [C, 4, 4] Projection matrices
@@ -1280,7 +1316,8 @@ class GaussianSplat3d {
 
     ProjectedGaussianSplats projectGaussiansImpl(const torch::Tensor &worldToCameraMatrices,
                                                  const torch::Tensor &projectionMatrices,
-                                                 const fvdb::detail::ops::RenderSettings &settings);
+                                                 const fvdb::detail::ops::RenderSettings &settings,
+                                                 const std::optional<torch::Tensor> &tilesToRender=std::nullopt);
 
     std::tuple<torch::Tensor, torch::Tensor> renderCropFromProjectedGaussiansImpl(
         const ProjectedGaussianSplats &state,

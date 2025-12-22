@@ -15,6 +15,7 @@
 
 // Ops headers
 #include <fvdb/detail/ops/gsplat/GaussianRasterizeContributingGaussianIds.h>
+#include <fvdb/detail/ops/gsplat/GaussianRasterizeForward.h>
 #include <fvdb/detail/ops/gsplat/GaussianRasterizeNumContributingGaussians.h>
 #include <fvdb/detail/ops/gsplat/GaussianRasterizeTopContributingGaussianIds.h>
 #include <fvdb/detail/ops/gsplat/GaussianRenderSettings.h>
@@ -281,7 +282,8 @@ GaussianSplat3d::loadStateDict(const std::unordered_map<std::string, torch::Tens
 GaussianSplat3d::ProjectedGaussianSplats
 GaussianSplat3d::projectGaussiansImpl(const torch::Tensor &worldToCameraMatrices,
                                       const torch::Tensor &projectionMatrices,
-                                      const RenderSettings &settings) {
+                                      const RenderSettings &settings,
+                                      const std::optional<torch::Tensor> &tilesToRender) {
     FVDB_FUNC_RANGE();
     const bool ortho = settings.projectionType == fvdb::detail::ops::ProjectionType::ORTHOGRAPHIC;
     const int C      = worldToCameraMatrices.size(0); // number of cameras
@@ -373,6 +375,8 @@ GaussianSplat3d::projectGaussiansImpl(const torch::Tensor &worldToCameraMatrices
     // Intersect projected Gaussians with image tiles [non-differentiable]
     const int numTilesW = std::ceil(settings.imageWidth / static_cast<float>(settings.tileSize));
     const int numTilesH = std::ceil(settings.imageHeight / static_cast<float>(settings.tileSize));
+    // const int64_t T = tilesToRender.has_value() ? tilesToRender->size(1) : numTilesH * numTilesW;
+    
     const auto [tileOffsets, tileGaussianIds] = FVDB_DISPATCH_KERNEL(mMeans.device(), [&]() {
         return detail::ops::dispatchGaussianTileIntersection<DeviceTag>(ret.perGaussian2dMean,
                                                                         ret.perGaussianRadius,
@@ -936,6 +940,47 @@ GaussianSplat3d::sparseRenderNumContributingGaussians(const fvdb::JaggedTensor &
 
     return sparseRenderNumContributingGaussiansImpl(
         pixelsToRender, worldToCameraMatrices, projectionMatrices, settings);
+}
+
+std::tuple<torch::Tensor, torch::Tensor>
+GaussianSplat3d::tileSparseRenderImages(const torch::Tensor &tilesToRender,
+                                        const torch::Tensor &worldToCameraMatrices,
+                                        const torch::Tensor &projectionMatrices,
+                                        const size_t imageWidth,
+                                        const size_t imageHeight,
+                                        const float near,
+                                        const float far,
+                                        const ProjectionType projectionType,
+                                        const int64_t shDegreeToUse,
+                                        const size_t tileSize,
+                                        const float minRadius2d,
+                                        const float eps2d,
+                                        const bool antialias,
+                                        const std::optional<torch::Tensor> &backgrounds) {
+
+    const int64_t C = worldToCameraMatrices.size(0);
+    const int64_t T = tilesToRender.size(1);
+
+    RenderSettings settings;
+    settings.imageWidth     = imageWidth;
+    settings.imageHeight    = imageHeight;
+    settings.nearPlane      = near;
+    settings.farPlane       = far;
+    settings.projectionType = projectionType;
+    settings.shDegreeToUse  = shDegreeToUse;
+    settings.tileSize       = tileSize;
+    settings.radiusClip     = minRadius2d;
+    settings.eps2d          = eps2d;
+    settings.renderMode     = RenderSettings::RenderMode::RGB;
+
+    const ProjectedGaussianSplats &state = 
+        projectGaussiansImpl(worldToCameraMatrices, projectionMatrices, settings, tilesToRender);
+
+    // dummy outputs
+    torch::Tensor renderedImages = torch::zeros({C, T, static_cast<long>(tileSize), static_cast<long>(tileSize), 3}, tilesToRender.options().dtype(torch::kFloat32));
+    torch::Tensor renderedAlphas = torch::zeros({C, T, static_cast<long>(tileSize), static_cast<long>(tileSize)}, tilesToRender.options().dtype(torch::kFloat32));
+
+    return {renderedImages, renderedAlphas};
 }
 
 std::tuple<fvdb::JaggedTensor, fvdb::JaggedTensor>
