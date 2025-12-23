@@ -97,7 +97,7 @@ template <typename ScalarType, size_t NUM_CHANNELS, bool IS_PACKED> struct Raste
 
     // Common sparse input tensors
     bool mIsSparse;
-    TorchRAcc64<uint32_t, 1> mActiveTiles;             // [AT]
+    TorchRAcc64<int32_t, 1> mActiveTiles;             // [AT]
     TorchRAcc64<uint64_t, 2> mTilePixelMask;          // [AT, wordsPerTile] e.g. [AT, 4]
     TorchRAcc64<int64_t, 1> mTilePixelCumsum;         // [AT]
     TorchRAcc64<int64_t, 1> mPixelMap;                // [AP]
@@ -138,7 +138,7 @@ template <typename ScalarType, size_t NUM_CHANNELS, bool IS_PACKED> struct Raste
           mTileOffsets(initAccessor<int32_t, 3>(tileOffsets, "tileOffsets")),
           mTileGaussianIds(initAccessor<int32_t, 1>(tileGaussianIds, "tileGaussianIds")),
           mIsSparse(activeTiles.has_value()),
-          mActiveTiles(initAccessor<uint32_t, 1>(activeTiles, tileOffsets.options().dtype(torch::kUInt32), "activeTiles")),
+          mActiveTiles(initAccessor<int32_t, 1>(activeTiles, tileOffsets.options(), "activeTiles")),
           mTilePixelMask(initAccessor<uint64_t, 2>(
               tilePixelMask, means2d.options().dtype(torch::kUInt64), "tilePixelMask")),
           mTilePixelCumsum(initAccessor<int64_t, 1>(
