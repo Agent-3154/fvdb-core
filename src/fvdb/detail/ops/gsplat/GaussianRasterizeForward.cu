@@ -772,8 +772,8 @@ launchRasterizeTileSparseForwardKernel(
 ) {
     const at::cuda::OptionalCUDAGuard device_guard(device_of(means2d));
     
-    std::cout<<tileOffsets.sizes()<<std::endl;
-    std::cout<<activeTiles.sizes()<<std::endl;
+    // std::cout<<tileOffsets.sizes()<<std::endl;
+    // std::cout<<activeTiles.sizes()<<std::endl;
     
     const uint32_t C        = means2d.size(0);     // number of cameras
     const uint32_t N        = means2d.size(1);     // number of gaussians
@@ -783,7 +783,7 @@ launchRasterizeTileSparseForwardKernel(
     auto outAlphas   = torch::zeros({C, numTilesPerCamera, tileSize, tileSize, 1}, means2d.options().dtype(torch::kFloat32));
     auto outLastIds  = torch::zeros({C, numTilesPerCamera, tileSize, tileSize}, means2d.options().dtype(torch::kInt32));
 
-    std::cout<<"creating args"<<std::endl;
+    // std::cout<<"creating args"<<std::endl;
     // Convert activeTiles to int32_t if needed (commonArgs expects int32_t)
     // torch::Tensor activeTilesInt32 = activeTiles.dtype() == torch::kInt32 
     //     ? activeTiles 
@@ -1372,10 +1372,10 @@ dispatchGaussianTileSparseRasterizeForward<torch::kCUDA>(
     const uint32_t channels = features.size(-1);
 
     const std::optional<torch::Tensor> masks = std::nullopt;
-    std::cout << "tileOffsets: " << tileOffsets.sizes() << std::endl;
-    std::cout << "tileGaussianIds: " << tileGaussianIds.sizes() << std::endl;
-    std::cout << "numTilesPerCamera: " << numTilesPerCamera << std::endl;
-    std::cout << "activeTiles: " << activeTiles.sizes() << std::endl;
+    // std::cout << "tileOffsets: " << tileOffsets.sizes() << std::endl;
+    // std::cout << "tileGaussianIds: " << tileGaussianIds.sizes() << std::endl;
+    // std::cout << "numTilesPerCamera: " << numTilesPerCamera << std::endl;
+    // std::cout << "activeTiles: " << activeTiles.sizes() << std::endl;
 
 #define CALL_FWD_TILE_CUDA(N)                                                                        \
     case N: {                                                                                   \
