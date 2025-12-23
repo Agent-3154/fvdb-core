@@ -397,15 +397,16 @@ GaussianSplat3d::projectGaussiansImpl(const torch::Tensor &worldToCameraMatrices
                                                                             ret.perGaussianRadius,
                                                                             ret.perGaussianDepth,
                                                                             tileMask,
-                                                                            activeTiles,
+                                                                            activeTiles, // UInt32
                                                                             at::nullopt,
                                                                             C,
                                                                             settings.tileSize,
                                                                             numTilesH,
                                                                             numTilesW);
         });
-        ret.tileOffsets                           = tileOffsets;     // [C, TH, TW]
+        ret.tileOffsets                           = tileOffsets;     // [C * T + 1]
         ret.tileGaussianIds                       = tileGaussianIds; // [TOT_INTERSECTIONS]
+        ret.activeTiles                           = activeTiles;   // [C * T]
     } else {
         const auto [tileOffsets, tileGaussianIds] = FVDB_DISPATCH_KERNEL(mMeans.device(), [&]() {
             return detail::ops::dispatchGaussianTileIntersection<DeviceTag>(ret.perGaussian2dMean,
@@ -988,7 +989,7 @@ GaussianSplat3d::tileSparseRenderImages(const torch::Tensor &tilesToRender,
                                         const bool antialias,
                                         const std::optional<torch::Tensor> &backgrounds) {
 
-    const int64_t C = worldToCameraMatrices.size(0);
+    // const int64_t C = worldToCameraMatrices.size(0);
     const int64_t T = tilesToRender.size(1);
 
     RenderSettings settings;
@@ -1006,11 +1007,29 @@ GaussianSplat3d::tileSparseRenderImages(const torch::Tensor &tilesToRender,
     const ProjectedGaussianSplats &state = 
         projectGaussiansImpl(worldToCameraMatrices, projectionMatrices, settings, tilesToRender);
 
-    // dummy outputs
-    torch::Tensor renderedImages = torch::zeros({C, T, static_cast<long>(tileSize), static_cast<long>(tileSize), 3}, tilesToRender.options().dtype(torch::kFloat32));
-    torch::Tensor renderedAlphas = torch::zeros({C, T, static_cast<long>(tileSize), static_cast<long>(tileSize)}, tilesToRender.options().dtype(torch::kFloat32));
-
-    return {renderedImages, renderedAlphas};
+    // // dummy outputs
+    // torch::Tensor renderedImages = torch::zeros({C, T, static_cast<long>(tileSize), static_cast<long>(tileSize), 3}, tilesToRender.options().dtype(torch::kFloat32));
+    // torch::Tensor renderedAlphas = torch::zeros({C, T, static_cast<long>(tileSize), static_cast<long>(tileSize)}, tilesToRender.options().dtype(torch::kFloat32));
+    // return std::make_tuple(renderedImages, renderedAlphas);
+    FVDB_FUNC_RANGE();
+    auto outputs =  FVDB_DISPATCH_KERNEL_DEVICE(state.perGaussian2dMean.device(), [&]() {
+        return fvdb::detail::ops::dispatchGaussianTileSparseRasterizeForward<DeviceTag>(
+            state.perGaussian2dMean,
+            state.perGaussianConic,
+            state.perGaussianRenderQuantity,
+            state.perGaussianOpacity,
+            static_cast<uint32_t>(settings.imageWidth),
+            static_cast<uint32_t>(settings.imageHeight),
+            0, // imageOriginW
+            0, // imageOriginH
+            static_cast<uint32_t>(settings.tileSize),
+            state.tileOffsets,
+            state.tileGaussianIds,
+            static_cast<uint32_t>(T), // numTilesPerCamera
+            state.activeTiles,
+            backgrounds);
+    });
+    return std::make_tuple(std::get<0>(outputs), std::get<1>(outputs));
 }
 
 std::tuple<fvdb::JaggedTensor, fvdb::JaggedTensor>

@@ -108,6 +108,47 @@ dispatchGaussianSparseRasterizeForward(
     const torch::Tensor &pixelMap,
     const at::optional<torch::Tensor> &backgrounds = at::nullopt);
 
+/// @brief Dispatches the tile sparse Gaussian rasterization forward pass to the specified device.
+/// Renders only specified tiles, writing to regular tensors [C, T, tile_size, tile_size, D].
+/// Output tensors are allocated internally.
+/// @tparam DeviceType Device type template parameter (torch::kCUDA or torch::kCPU)
+/// @param means2d Tensor of 2D means [C, N, 2] or [nnz, 2].
+/// @param conics Tensor of conic parameters [C, N, 3] or [nnz, 3].
+/// @param features Tensor of features [C, N, D] or [nnz, D].
+/// @param opacities Tensor of opacities [C, N] or [nnz].
+/// @param imageWidth Width of the full image (for coordinate calculations).
+/// @param imageHeight Height of the full image (for coordinate calculations).
+/// @param imageOriginW Horizontal origin of the image grid.
+/// @param imageOriginH Vertical origin of the image grid.
+/// @param tileSize Size of the tiles used for processing.
+/// @param tileOffsets Tensor containing offsets for each tile [C * T + 1].
+/// @param tileGaussianIds Tensor mapping tiles to Gaussian IDs [n_isects].
+/// @param numTilesPerCamera Number of tiles per camera (T).
+/// @param activeTiles Tensor containing the indices of active tiles [C * T].
+/// @param backgrounds Optional background color per camera [C, D]. If provided, background
+/// colors will be blended with transparent pixels. If not provided, background is assumed to be
+/// black.
+/// @return A tuple containing:
+///         - Output features tensor [C, T, tile_size, tile_size, D].
+///         - Output alphas tensor [C, T, tile_size, tile_size, 1].
+///         - Output last Gaussian IDs tensor [C, T, tile_size, tile_size].
+template <torch::DeviceType>
+std::tuple<torch::Tensor, torch::Tensor, torch::Tensor>
+dispatchGaussianTileSparseRasterizeForward(
+    const torch::Tensor &means2d,
+    const torch::Tensor &conics,
+    const torch::Tensor &features,
+    const torch::Tensor &opacities,
+    const uint32_t imageWidth,
+    const uint32_t imageHeight,
+    const uint32_t imageOriginW,
+    const uint32_t imageOriginH,
+    const uint32_t tileSize,
+    const torch::Tensor &tileOffsets,
+    const torch::Tensor &tileGaussianIds,
+    const uint32_t numTilesPerCamera,
+    const torch::Tensor &activeTiles,
+    const at::optional<torch::Tensor> &backgrounds = at::nullopt);
 } // namespace ops
 } // namespace detail
 } // namespace fvdb
