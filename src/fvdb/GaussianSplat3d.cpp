@@ -10,6 +10,7 @@
 #include <fvdb/detail/autograd/GaussianRender.h>
 
 // Ops headers
+#include <fvdb/detail/ops/gsplat/GaussianRasterizeForward.h>
 #include <fvdb/detail/ops/gsplat/GaussianRasterizeNumContributingGaussians.h>
 #include <fvdb/detail/ops/gsplat/GaussianRasterizeTopContributingGaussianIds.h>
 #include <fvdb/detail/ops/gsplat/GaussianRenderSettings.h>
@@ -384,6 +385,135 @@ GaussianSplat3d::projectGaussiansImpl(const torch::Tensor &worldToCameraMatrices
     return ret;
 }
 
+std::tuple<GaussianSplat3d::ProjectedGaussianSplats, torch::Tensor>
+GaussianSplat3d::projectGaussiansSparseImpl(
+    const torch::Tensor &tilesToRender, // [C, T, 2]
+    const torch::Tensor &worldToCameraMatrices,
+    const torch::Tensor &projectionMatrices,
+    const RenderSettings &settings)
+{
+    FVDB_FUNC_RANGE();
+    const bool ortho = settings.projectionType == fvdb::detail::ops::ProjectionType::ORTHOGRAPHIC;
+    const int C      = worldToCameraMatrices.size(0); // number of cameras
+    const int N      = mMeans.size(0);                // number of gaussians
+
+    TORCH_CHECK(worldToCameraMatrices.sizes() == torch::IntArrayRef({C, 4, 4}),
+                "worldToCameraMatrices must have shape (C, 4, 4)");
+    TORCH_CHECK(projectionMatrices.sizes() == torch::IntArrayRef({C, 3, 3}),
+                "projectionMatrices must have shape (C, 3, 3)");
+    TORCH_CHECK(worldToCameraMatrices.is_contiguous(), "worldToCameraMatrices must be contiguous");
+    TORCH_CHECK(projectionMatrices.is_contiguous(), "projectionMatrices must be contiguous");
+
+    ProjectedGaussianSplats ret;
+    ret.mRenderSettings = settings;
+
+    // Track gradients for the 2D means in the backward pass if you're optimizing
+    std::optional<torch::Tensor> maybeNormalizedMeans2dGradientNorms = std::nullopt;
+    std::optional<torch::Tensor> maybePerGaussianRadiiForGrad        = std::nullopt;
+    std::optional<torch::Tensor> maybeGradientStepCount              = std::nullopt;
+    if (mAccumulateMean2dGradients) {
+        if (mAccumulatedNormalized2dMeansGradientNormsForGrad.numel() != N) {
+            mAccumulatedNormalized2dMeansGradientNormsForGrad = torch::zeros({N}, mMeans.options());
+        }
+        if (mGradientStepCountForGrad.numel() != N) {
+            mGradientStepCountForGrad = torch::zeros(
+                {N}, torch::TensorOptions().dtype(torch::kInt32).device(mMeans.device()));
+        }
+        maybeNormalizedMeans2dGradientNorms = mAccumulatedNormalized2dMeansGradientNormsForGrad;
+        maybeGradientStepCount              = mGradientStepCountForGrad;
+    }
+    if (mAccumulateMax2dRadii) {
+        if (mAccumulated2dRadiiForGrad.numel() != N && mAccumulateMax2dRadii) {
+            mAccumulated2dRadiiForGrad = torch::zeros(
+                {N}, torch::TensorOptions().dtype(torch::kInt32).device(mMeans.device()));
+        }
+        maybePerGaussianRadiiForGrad = mAccumulated2dRadiiForGrad;
+    }
+
+    // Project to image plane
+    const auto projectionResults =
+        detail::autograd::ProjectGaussians::apply(mMeans,
+                                                  mQuats,
+                                                  mLogScales,
+                                                  worldToCameraMatrices,
+                                                  projectionMatrices,
+                                                  settings.imageWidth,
+                                                  settings.imageHeight,
+                                                  settings.eps2d,
+                                                  settings.nearPlane,
+                                                  settings.farPlane,
+                                                  settings.radiusClip,
+                                                  settings.antialias,
+                                                  ortho,
+                                                  maybeNormalizedMeans2dGradientNorms,
+                                                  maybePerGaussianRadiiForGrad,
+                                                  maybeGradientStepCount);
+    ret.perGaussianRadius = projectionResults[0];
+    ret.perGaussian2dMean = projectionResults[1];
+    ret.perGaussianDepth  = projectionResults[2];
+    ret.perGaussianConic  = projectionResults[3];
+    // FIXME: Use accessors in the kernel and use exapand
+    ret.perGaussianOpacity = opacities().repeat({C, 1});
+    if (settings.antialias) {
+        ret.perGaussianOpacity *= projectionResults[4];
+        // FIXME (Francis): The contiguity requirement is dumb and should be
+        // removed by using accessors in the kernel
+        ret.perGaussianOpacity = ret.perGaussianOpacity.contiguous();
+    }
+
+    ret.perGaussianRenderQuantity = [&]() {
+        torch::Tensor renderQuantity;
+        if (settings.renderMode == RenderMode::DEPTH) {
+            renderQuantity = ret.perGaussianDepth.unsqueeze(-1); // [C, N, 1]
+        } else if (settings.renderMode == RenderMode::RGB ||
+                   settings.renderMode == RenderMode::RGBD) {
+            renderQuantity = evalSphericalHarmonicsImpl(
+                settings.shDegreeToUse, worldToCameraMatrices, ret.perGaussianRadius);
+
+            if (settings.renderMode == RenderMode::RGBD) {
+                renderQuantity = torch::cat({renderQuantity, ret.perGaussianDepth.unsqueeze(-1)},
+                                            -1); // [C, N, D + 1]
+            }
+        } else {
+            TORCH_CHECK_VALUE(false, "Invalid render mode");
+        }
+        return renderQuantity;
+    }();
+
+    // Intersect projected Gaussians with image tiles [non-differentiable]
+    const int numTilesW = std::ceil(settings.imageWidth / static_cast<float>(settings.tileSize));
+    const int numTilesH = std::ceil(settings.imageHeight / static_cast<float>(settings.tileSize));
+    torch::Tensor cameraIds = torch::arange(C, mMeans.options().dtype(torch::kInt32));
+    torch::Tensor tileMask = torch::zeros({C, numTilesH, numTilesW}, mMeans.options().dtype(torch::kBool));
+    auto tileY = tilesToRender.select(2, 0);
+    auto tileX = tilesToRender.select(2, 1);
+    torch::Tensor activeTiles = (
+        (cameraIds.unsqueeze(1) * (numTilesH * numTilesW)
+        + tileY * numTilesW + tileX).flatten().to(torch::kUInt32)
+    ); // [C * T]
+    tileMask.index_put_(
+        {cameraIds.unsqueeze(1), tileY, tileX},
+        true
+    );
+
+    const auto [tileOffsets, tileGaussianIds] = FVDB_DISPATCH_KERNEL_DEVICE(mMeans.device(), [&]() {
+        return detail::ops::dispatchGaussianTileIntersectionSparse<DeviceTag>(ret.perGaussian2dMean,
+                                                                        ret.perGaussianRadius,
+                                                                        ret.perGaussianDepth,
+                                                                        tileMask,
+                                                                        activeTiles,
+                                                                        at::nullopt,
+                                                                        C,
+                                                                        settings.tileSize,
+                                                                        numTilesH,
+                                                                        numTilesW);
+    });
+    ret.tileOffsets                           = tileOffsets;     // [C * T + 1]
+    ret.tileGaussianIds                       = tileGaussianIds; // [TOT_INTERSECTIONS]
+
+    return std::make_tuple(ret, activeTiles);
+}
+
 std::tuple<torch::Tensor, torch::Tensor>
 GaussianSplat3d::renderCropFromProjectedGaussiansImpl(
     const ProjectedGaussianSplats &projectedGaussians,
@@ -438,6 +568,45 @@ GaussianSplat3d::renderImpl(const torch::Tensor &worldToCameraMatrices,
         projectGaussiansImpl(worldToCameraMatrices, projectionMatrices, settings);
     return renderCropFromProjectedGaussiansImpl(
         state, settings.tileSize, settings.imageWidth, settings.imageHeight, 0, 0);
+}
+
+std::tuple<torch::Tensor, torch::Tensor>
+GaussianSplat3d::tileSparseRenderImpl(
+    const torch::Tensor &tilesToRender,
+    const torch::Tensor &worldToCameraMatrices,
+    const torch::Tensor &projectionMatrices,
+    const fvdb::detail::ops::RenderSettings &settings)
+{
+    const int64_t C = tilesToRender.size(0);
+    const int64_t T = tilesToRender.size(1);
+    const auto [state, activeTiles] =
+        projectGaussiansSparseImpl(tilesToRender, worldToCameraMatrices, projectionMatrices, settings);
+    
+    // dummy outputs
+    // const size_t tileSize = settings.tileSize;
+    // torch::Tensor renderedImages = torch::zeros({C, T, static_cast<long>(tileSize), static_cast<long>(tileSize), 3}, tilesToRender.options().dtype(torch::kFloat32));
+    // torch::Tensor renderedAlphas = torch::zeros({C, T, static_cast<long>(tileSize), static_cast<long>(tileSize)}, tilesToRender.options().dtype(torch::kFloat32));
+    // return std::make_tuple(renderedImages, renderedAlphas);
+
+    auto outputs =  FVDB_DISPATCH_KERNEL_DEVICE(state.perGaussian2dMean.device(), [&]() {
+        return fvdb::detail::ops::dispatchGaussianTileSparseRasterizeForward<DeviceTag>(
+            state.perGaussian2dMean,
+            state.perGaussianConic,
+            state.perGaussianRenderQuantity,
+            state.perGaussianOpacity,
+            static_cast<uint32_t>(settings.imageWidth),
+            static_cast<uint32_t>(settings.imageHeight),
+            0, // imageOriginW
+            0, // imageOriginH
+            static_cast<uint32_t>(settings.tileSize),
+            state.tileOffsets,
+            state.tileGaussianIds,
+            static_cast<uint32_t>(T), // numTilesPerCamera
+            // activeTiles
+            tilesToRender.reshape({C * T, 2})
+        );
+    });
+    return std::make_tuple(std::get<0>(outputs), std::get<1>(outputs));
 }
 
 std::tuple<torch::Tensor, torch::Tensor>
@@ -706,6 +875,38 @@ GaussianSplat3d::renderImages(const torch::Tensor &worldToCameraMatrices,
     settings.renderMode     = RenderSettings::RenderMode::RGB;
 
     return renderImpl(worldToCameraMatrices, projectionMatrices, settings);
+}
+
+std::tuple<torch::Tensor, torch::Tensor>
+GaussianSplat3d::tileSparseRenderImages(
+    const torch::Tensor &tilesToRender,
+    const torch::Tensor &worldToCameraMatrices,
+    const torch::Tensor &projectionMatrices,
+    const size_t imageWidth,
+    const size_t imageHeight,
+    const float near,
+    const float far,
+    const ProjectionType projectionType,
+    const int64_t shDegreeToUse,
+    const size_t tileSize,
+    const float minRadius2d,
+    const float eps2d,
+    const bool antialias)
+{
+    RenderSettings settings;
+    settings.imageWidth     = imageWidth;
+    settings.imageHeight    = imageHeight;
+    settings.nearPlane      = near;
+    settings.farPlane       = far;
+    settings.projectionType = projectionType;
+    settings.shDegreeToUse  = shDegreeToUse;
+    settings.radiusClip     = minRadius2d;
+    settings.eps2d          = eps2d;
+    settings.antialias      = antialias;
+    settings.tileSize       = tileSize;
+    settings.renderMode     = RenderSettings::RenderMode::RGB;
+
+    return tileSparseRenderImpl(tilesToRender, worldToCameraMatrices, projectionMatrices, settings);
 }
 
 std::tuple<torch::Tensor, torch::Tensor>

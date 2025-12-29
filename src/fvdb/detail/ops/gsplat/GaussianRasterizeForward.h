@@ -57,6 +57,23 @@ dispatchGaussianRasterizeForward(const torch::Tensor &means2d,   // [C, N, 2]
                                  const torch::Tensor &tileGaussianIds // [n_isects]
 );
 
+template <torch::DeviceType>
+std::tuple<torch::Tensor, torch::Tensor, torch::Tensor>
+dispatchGaussianTileSparseRasterizeForward(const torch::Tensor &means2d,   // [C, N, 2]
+                                            const torch::Tensor &conics,    // [C, N, 3]
+                                            const torch::Tensor &features,  // [C, N, D]
+                                            const torch::Tensor &opacities, // [N]
+                                            const uint32_t imageWidth,
+                                            const uint32_t imageHeight,
+                                            const uint32_t imageOriginW,
+                                            const uint32_t imageOriginH,
+                                            const uint32_t tileSize,
+                                            const torch::Tensor &tileOffsets, // [C * T + 1]
+                                            const torch::Tensor &tileGaussianIds, // [n_isects]
+                                            const uint32_t numTilesPerCamera,
+                                            const torch::Tensor &activeTiles // [C * T]
+);
+
 /// @brief Dispatches the sparse Gaussian rasterization forward pass to the specified device.
 /// Renders only specified pixels.
 /// @tparam Device The device type (e.g., torch::kCPU or torch::kCUDA).

@@ -883,6 +883,21 @@ class GaussianSplat3d {
                  const float minRadius2d             = 0.0,
                  const float eps2d                   = 0.3,
                  const bool antialias                = false);
+    
+    std::tuple<torch::Tensor, torch::Tensor>
+    tileSparseRenderImages(const torch::Tensor &tilesToRender,
+                           const torch::Tensor &worldToCameraMatrices,
+                           const torch::Tensor &projectionMatrices,
+                           const size_t imageWidth,
+                           const size_t imageHeight,
+                           const float near,
+                           const float far,
+                           const ProjectionType projectionType = ProjectionType::PERSPECTIVE,
+                           const int64_t shDegreeToUse         = -1,
+                           const size_t tileSize               = 16,
+                           const float minRadius2d             = 0.0,
+                           const float eps2d                   = 0.3,
+                           const bool antialias                = false);
 
     /// @brief Render depths of this Gaussian splat scene from the given camera matrices and
     /// projection matrices.
@@ -1132,6 +1147,11 @@ class GaussianSplat3d {
                                                  const torch::Tensor &projectionMatrices,
                                                  const fvdb::detail::ops::RenderSettings &settings);
 
+    std::tuple<ProjectedGaussianSplats, torch::Tensor> projectGaussiansSparseImpl(const torch::Tensor &tilesToRender,
+                                                       const torch::Tensor &worldToCameraMatrices,
+                                                       const torch::Tensor &projectionMatrices,
+                                                       const fvdb::detail::ops::RenderSettings &settings);
+
     std::tuple<torch::Tensor, torch::Tensor>
     renderCropFromProjectedGaussiansImpl(const ProjectedGaussianSplats &state,
                                          const size_t tileSize,
@@ -1165,7 +1185,13 @@ class GaussianSplat3d {
     renderImpl(const torch::Tensor &worldToCameraMatrices,
                const torch::Tensor &projectionMatrices,
                const fvdb::detail::ops::RenderSettings &settings);
-
+    
+    std::tuple<torch::Tensor, torch::Tensor>
+    tileSparseRenderImpl(const torch::Tensor &tilesToRender,
+                         const torch::Tensor &worldToCameraMatrices,
+                         const torch::Tensor &projectionMatrices,
+                         const fvdb::detail::ops::RenderSettings &settings);
+    
     /// @brief Render the number of contributing Gaussians for each pixel in the image.
     /// @param worldToCameraMatrices [C, 4, 4]
     /// @param projectionMatrices [C, 3, 3]

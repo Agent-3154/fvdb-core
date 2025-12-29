@@ -1776,6 +1776,108 @@ class GaussianSplat3d:
             eps_2d=eps_2d,
             antialias=antialias,
         )
+    
+    def tile_sparse_render_images(
+        self,
+        tiles_to_render: torch.Tensor,
+        world_to_camera_matrices: torch.Tensor,
+        projection_matrices: torch.Tensor,
+        image_width: int,
+        image_height: int,
+        near: float,
+        far: float,
+        projection_type=ProjectionType.PERSPECTIVE,
+        sh_degree_to_use: int = -1,
+        tile_size: int = 16,
+        min_radius_2d: float = 0.0,
+        eps_2d: float = 0.3,
+        antialias: bool = False,
+        backgrounds: torch.Tensor | None = None,
+    ) -> tuple[torch.Tensor, torch.Tensor]:
+        """
+        Render ``C`` multi-channel images (see :attr:`num_channels`) from this :class:`GaussianSplat3d` from ``C`` camera views,
+        rendering only the tiles specified by tile coordinates. Returns regular tensors instead of JaggedTensors.
+
+        .. note::
+
+            All cameras must render the same number of tiles (T is constant).
+
+        Example:
+
+        .. code-block:: python
+
+            # Assume gaussian_splat_3d is an instance of GaussianSplat3d
+            # tiles_to_render is a tensor of shape [C, T, 2] where T is the number of tiles per camera
+            tiles_to_render = torch.tensor([[[0, 0], [0, 1], [1, 0]], [[1, 1], [2, 2], [0, 0]]], dtype=torch.int32)
+            
+            images, alpha_images = gaussian_splat_3d.tile_sparse_render_images(
+                tiles_to_render=tiles_to_render,
+                world_to_camera_matrices, # tensor of shape [C, 4, 4]
+                projection_matrices, # tensor of shape [C, 3, 3]
+                image_width, # width of the images
+                image_height, # height of the images
+                near, # near clipping plane
+                far) # far clipping plane
+            # images is a tensor of shape [C, T, tile_size, tile_size, D] where T is the number of tiles per camera
+            # alpha_images is a tensor of shape [C, T, tile_size, tile_size, 1]
+
+        Args:
+            tiles_to_render (torch.Tensor): A tensor of shape ``(C, T, 2)`` where each element is ``[tile_y, tile_x]``
+                tile coordinates. T must be the same for all cameras.
+            world_to_camera_matrices (torch.Tensor): Tensor of shape ``(C, 4, 4)`` representing the
+                world-to-camera transformation matrices for C cameras. Each matrix transforms points
+                from world coordinates to camera coordinates.
+            projection_matrices (torch.Tensor): Tensor of shape ``(C, 3, 3)`` representing the projection matrices for ``C`` cameras.
+                Each matrix projects points in camera space into homogeneous pixel coordinates.
+            image_width (int): The width of the images to be rendered. Note these are the same for all images being rendered.
+            image_height (int): The height of the images to be rendered. Note these are the same for all images being rendered.
+            near (float): The near clipping plane distance for the projection.
+            far (float): The far clipping plane distance for the projection.
+            projection_type (ProjectionType): The type of projection to use. Default is :attr:`fvdb.ProjectionType.PERSPECTIVE`.
+            sh_degree_to_use (int): The degree of spherical harmonics to use for rendering. -1 means use all available SH bases.
+                0 means use only the first SH base (constant color). Note that you can't use more SH bases than available in the GaussianSplat3d instance.
+                Default is -1.
+            tile_size (int): The size of the tiles to use for rendering. Default is 16. You shouldn't set this parameter unless you really know what you are doing.
+            min_radius_2d (float): The minimum radius (in pixels) below which Gaussians are ignored during rendering.
+            eps_2d (float): A value used to pad Gaussians when projecting them onto the image plane, to avoid very projected Gaussians which create artifacts and
+                numerical issues.
+            antialias (bool): If ``True``, applies opacity correction to the projected Gaussians when using ``eps_2d > 0.0``.
+
+            backgrounds (torch.Tensor | None): Optional tensor of shape ``(C, D)`` representing
+                background colors for each camera. If provided, these will be used for pixels outside rendered tiles.
+                Default is None.
+
+        Returns:
+            images (torch.Tensor): A tensor of shape ``(C, T, tile_size, tile_size, D)`` where ``C`` is the number of camera views,
+                ``T`` is the number of tiles rendered per camera (same for all cameras), ``tile_size`` is the tile size,
+                and ``D`` is the number of channels. Tiles are ordered according to the input ``tiles_to_render``.
+            alpha_images (torch.Tensor): A tensor of shape ``(C, T, tile_size, tile_size, 1)`` where ``C`` is the number of camera views,
+                ``T`` is the number of tiles rendered per camera, and ``tile_size`` is the tile size.
+                Each element represents the alpha value (opacity) at a pixel such that ``0 <= alpha < 1``,
+                and 0 means the pixel is fully transparent, and 1 means the pixel is fully opaque.
+        """
+        
+        # Validate inputs before passing to C++
+        if tiles_to_render.dim() != 3:
+            raise ValueError(f"tiles_to_render must have 3 dimensions, but got {tiles_to_render.dim()}. Shape: {tiles_to_render.shape}")
+        if tiles_to_render.shape[2] != 2:
+            raise ValueError(f"tiles_to_render must have shape [C, T, 2], but got shape {tiles_to_render.shape}")
+        
+        return self._impl.tile_sparse_render_images(
+            tiles_to_render=tiles_to_render,
+            world_to_camera_matrices=world_to_camera_matrices,
+            projection_matrices=projection_matrices,
+            image_width=image_width,
+            image_height=image_height,
+            near=near,
+            far=far,
+            projection_type=self._proj_type_to_cpp(projection_type),
+            sh_degree_to_use=sh_degree_to_use,
+            tile_size=tile_size,
+            min_radius_2d=min_radius_2d,
+            eps_2d=eps_2d,
+            antialias=antialias,
+        )
 
     def render_images_and_depths(
         self,
