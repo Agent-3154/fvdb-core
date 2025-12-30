@@ -692,9 +692,11 @@ launchRasterizeForwardKernel(
                  sharedMem,
                  " bytes), try lowering tile_size.");
     }
-
-    rasterizeGaussiansForward<<<args.commonArgs.getGridDim(),
-                                args.commonArgs.getBlockDim(),
+    const dim3 gridDim = args.commonArgs.getGridDim();
+    const dim3 blockDim = args.commonArgs.getBlockDim();
+    
+    rasterizeGaussiansForward<<<gridDim,
+                                blockDim,
                                 sharedMem,
                                 stream>>>(args);
 
@@ -755,7 +757,7 @@ launchRasterizeTileSparseForwardKernel(
            tileOffsetsSparse.options().dtype(torch::kInt32));
     
     // Create the args object with sparse tile offsets
-    auto args = RasterizeTileSparseForwardArgs<ScalarType, NUM_CHANNELS, false>(
+    auto args = RasterizeTileSparseForwardArgs<ScalarType, NUM_CHANNELS, IS_PACKED>(
         means2d,
         conics,
         opacities,
@@ -808,7 +810,7 @@ launchRasterizeTileSparseForwardKernel(
     const uint32_t sharedMem = getSharedMemRequirements<ScalarType>(tileSize);
     
     // Set shared memory attribute
-    if (cudaFuncSetAttribute(rasterizeGaussiansTileSparseForward<ScalarType, NUM_CHANNELS, false>,
+    if (cudaFuncSetAttribute(rasterizeGaussiansTileSparseForward<ScalarType, NUM_CHANNELS, IS_PACKED>,
                              cudaFuncAttributeMaxDynamicSharedMemorySize,
                              sharedMem) != cudaSuccess) {
         AT_ERROR("Failed to set maximum shared memory size (requested ",
