@@ -989,7 +989,7 @@ GaussianSplat3d::tileSparseRenderImages(const torch::Tensor &tilesToRender,
                                         const bool antialias,
                                         const std::optional<torch::Tensor> &backgrounds) {
 
-    // const int64_t C = worldToCameraMatrices.size(0);
+    const int64_t C = worldToCameraMatrices.size(0);
     const int64_t T = tilesToRender.size(1);
 
     RenderSettings settings;
@@ -1026,7 +1026,7 @@ GaussianSplat3d::tileSparseRenderImages(const torch::Tensor &tilesToRender,
             state.tileOffsets,
             state.tileGaussianIds,
             static_cast<uint32_t>(T), // numTilesPerCamera
-            state.activeTiles,
+            tilesToRender.reshape({C * T, 2}),
             backgrounds);
     });
     return std::make_tuple(std::get<0>(outputs), std::get<1>(outputs));

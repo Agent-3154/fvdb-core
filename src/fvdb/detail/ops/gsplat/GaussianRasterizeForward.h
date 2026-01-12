@@ -147,7 +147,7 @@ dispatchGaussianTileSparseRasterizeForward(
     const torch::Tensor &tileOffsets,
     const torch::Tensor &tileGaussianIds,
     const uint32_t numTilesPerCamera,
-    const torch::Tensor &activeTiles,
+    const torch::Tensor &tilesToRender,
     const at::optional<torch::Tensor> &backgrounds = at::nullopt);
 } // namespace ops
 } // namespace detail

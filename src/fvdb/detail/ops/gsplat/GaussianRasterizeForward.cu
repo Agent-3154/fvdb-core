@@ -244,7 +244,7 @@ struct RasterizeTileSparseForwardArgs {
     typename CommonArgs::template TorchRAcc64<ScalarType, 5> mOutAlphas;   // [C, T, tile_size, tile_size, 1]
     typename CommonArgs::template TorchRAcc64<int32_t, 4> mOutLastIds;    // [C, T, tile_size, tile_size]
     typename CommonArgs::template TorchRAcc64<int32_t, 1> mTileOffsetsSparse; // [C * T + 1] sparse cumulative offsets
-    typename CommonArgs::template TorchRAcc64<uint32_t, 1> mActiveTiles;      // [C * T] dense tile indices
+    typename CommonArgs::template TorchRAcc64<int32_t, 2> mTilesToRender;      // [C * T, 2]
     uint32_t mNumTilesPerCamera;
 
     RasterizeTileSparseForwardArgs(
@@ -259,10 +259,11 @@ struct RasterizeTileSparseForwardArgs {
         const uint32_t imageOriginW,
         const uint32_t imageOriginH,
         const uint32_t tileSize,
+        const torch::Tensor &tileOffsets, // [C, numTilesH, numTilesW] dummy dense tileOffsets
         const torch::Tensor &tileOffsetsSparse, // [C * T + 1] sparse cumulative offsets
         const torch::Tensor &tileGaussianIds,   // [totalIntersections]
         const uint32_t numTilesPerCamera,
-        const torch::Tensor &activeTiles,      // [C * T] dense tile indices
+        const torch::Tensor &tilesToRender,      // [C * T, 2]
         const torch::Tensor &outFeatures,      // [C, T, tile_size, tile_size, NUM_CHANNELS]
         const torch::Tensor &outAlphas,        // [C, T, tile_size, tile_size, 1]
         const torch::Tensor &outLastIds)       // [C, T, tile_size, tile_size]
@@ -278,21 +279,13 @@ struct RasterizeTileSparseForwardArgs {
                      imageOriginH,
                      tileSize,
                      0, // blockOffset
-                     // Create a dummy dense tileOffsets for commonArgs (it requires [C, H, W] format)
-                     torch::zeros({means2d.size(0), 
-                                   static_cast<int64_t>((imageHeight + tileSize - 1) / tileSize),
-                                   static_cast<int64_t>((imageWidth + tileSize - 1) / tileSize)},
-                                  tileOffsetsSparse.options().dtype(torch::kInt32)), // dummy dense tileOffsets
-                     tileGaussianIds,
-                     std::nullopt, // we do not pass in activeTiles here
-                     std::nullopt, // tilePixelMask
-                     std::nullopt, // tilePixelCumsum
-                     std::nullopt), // pixelMap
+                     tileOffsets,
+                     tileGaussianIds),
           mOutFeatures(initAccessor<ScalarType, 5>(outFeatures, "outFeatures")),
           mOutAlphas(initAccessor<ScalarType, 5>(outAlphas, "outAlphas")),
           mOutLastIds(initAccessor<int32_t, 4>(outLastIds, "outLastIds")),
           mTileOffsetsSparse(initAccessor<int32_t, 1>(tileOffsetsSparse, "tileOffsetsSparse")),
-          mActiveTiles(initAccessor<uint32_t, 1>(activeTiles, "activeTiles")),
+          mTilesToRender(initAccessor<int32_t, 2>(tilesToRender, "tilesToRender")),
           mNumTilesPerCamera(numTilesPerCamera) {}
 
     /// @brief Get the Gaussian ID range for a tile using sparse offsets
@@ -342,25 +335,25 @@ struct RasterizeTileSparseForwardArgs {
         }
     }
 
-    /// @brief Decode activeTiles entry to get camera and tile coordinates
-    /// @param tileIndex Index into activeTiles array (0 to C*T-1)
-    /// @return Tuple of (cameraId, tileY, tileX, tileId)
-    __device__ std::tuple<uint32_t, uint32_t, uint32_t, uint32_t>
-    decodeActiveTile(uint32_t tileIndex) const {
-        const uint32_t denseTileIndex = mActiveTiles[tileIndex];
-        const uint32_t numTilesPerImage = commonArgs.mNumTilesH * commonArgs.mNumTilesW;
+    // /// @brief Decode activeTiles entry to get camera and tile coordinates
+    // /// @param tileIndex Index into activeTiles array (0 to C*T-1)
+    // /// @return Tuple of (cameraId, tileY, tileX, tileId)
+    // __device__ std::tuple<uint32_t, uint32_t, uint32_t, uint32_t>
+    // decodeActiveTile(uint32_t tileIndex) const {
+    //     const uint32_t denseTileIndex = mActiveTiles[tileIndex];
+    //     const uint32_t numTilesPerImage = commonArgs.mNumTilesH * commonArgs.mNumTilesW;
         
-        // Decode: activeTiles[i] = cameraId * (numTilesH * numTilesW) + tileY * numTilesW + tileX
-        const uint32_t cameraId = denseTileIndex / numTilesPerImage;
-        const uint32_t tileFlat = denseTileIndex % numTilesPerImage;
-        const uint32_t tileY = tileFlat / commonArgs.mNumTilesW;
-        const uint32_t tileX = tileFlat % commonArgs.mNumTilesW;
+    //     // Decode: activeTiles[i] = cameraId * (numTilesH * numTilesW) + tileY * numTilesW + tileX
+    //     const uint32_t cameraId = denseTileIndex / numTilesPerImage;
+    //     const uint32_t tileFlat = denseTileIndex % numTilesPerImage;
+    //     const uint32_t tileY = tileFlat / commonArgs.mNumTilesW;
+    //     const uint32_t tileX = tileFlat % commonArgs.mNumTilesW;
         
-        // tileId is the index within the camera's tile list (0 to T-1)
-        const uint32_t tileId = tileIndex % mNumTilesPerCamera;
+    //     // tileId is the index within the camera's tile list (0 to T-1)
+    //     const uint32_t tileId = tileIndex % mNumTilesPerCamera;
         
-        return {cameraId, tileY, tileX, tileId};
-    }
+    //     return {cameraId, tileY, tileX, tileId};
+    // }
 
     /// @brief Volume render a tile of Gaussians
     /// @param cameraId The camera ID
@@ -373,8 +366,9 @@ struct RasterizeTileSparseForwardArgs {
     /// @param blockSize The size of the block
     __device__ void
     volumeRenderTileForward(const uint32_t cameraId,
-                            const uint32_t tileId,
-                            const uint32_t tileIndex,
+                            const uint32_t tileId, // [0, T - 1]
+                            const uint32_t tileY,
+                            const uint32_t tileX,
                             const uint32_t row,
                             const uint32_t col,
                             const uint32_t firstGaussianIdInBlock,
@@ -382,25 +376,6 @@ struct RasterizeTileSparseForwardArgs {
                             const uint32_t blockSize) {
         alignas(Gaussian2D<ScalarType>) extern __shared__ char s[];
         auto *sharedGaussians = reinterpret_cast<Gaussian2D<ScalarType> *>(s); // [blockSize]
-
-        // Decode tile coordinates from activeTiles
-        // Bounds check: ensure tileIndex is valid for activeTiles
-        const uint32_t maxActiveTileIndex = commonArgs.mNumCameras * mNumTilesPerCamera - 1;
-        if (tileIndex > maxActiveTileIndex) {
-            // Invalid tile index, write default values and return
-            writeAlpha(cameraId, tileId, row, col, 0.0f);
-            writeLastId(cameraId, tileId, row, col, -1);
-            writeFeatures(cameraId, tileId, row, col, [&](uint32_t k) {
-                return commonArgs.mHasBackgrounds ? commonArgs.mBackgrounds[cameraId][k] : 0.0f;
-            });
-            return;
-        }
-        
-        const uint32_t denseTileIndex = mActiveTiles[tileIndex];
-        const uint32_t numTilesPerImage = commonArgs.mNumTilesH * commonArgs.mNumTilesW;
-        const uint32_t tileFlat = denseTileIndex % numTilesPerImage;
-        const uint32_t tileY = tileFlat / commonArgs.mNumTilesW;
-        const uint32_t tileX = tileFlat % commonArgs.mNumTilesW;
 
         // NOTE: The accumulated transmittance is used in the backward pass, and
         // since it's a sum of many small numbers, we should really use double precision.
@@ -564,18 +539,14 @@ rasterizeGaussiansTileSparseForward(RasterizeTileSparseForwardArgs<ScalarType, N
     auto &commonArgs = args.commonArgs;
 
     // Each thread block processes one tile
-    // blockIdx.x is the camera index (0 to C-1)
-    // blockIdx.y is the tile index within the camera (0 to T-1)
-    const uint32_t cameraId = blockIdx.x;
-    const uint32_t tileId = blockIdx.y;
-    
-    // Compute tileIndex for accessing sparse offsets: tileIndex = cameraId * T + tileId
-    const uint32_t tileIndex = cameraId * args.mNumTilesPerCamera + tileId;
+    // blockIdx.x is the global tile index (0 to C * T - 1)
+    const int32_t globalTileId = blockIdx.x; // [0, C * T - 1]
+    const int32_t cameraId = globalTileId / args.mNumTilesPerCamera; // [0, C - 1]
+    const int32_t localTileId = globalTileId % args.mNumTilesPerCamera; // [0, T - 1]
     
     // Bounds check: ensure tileIndex is valid
     // tileOffsets has shape [C * T + 1], so valid tileIndex is 0 to C*T-1
-    const uint32_t maxTileIndex = args.mNumTilesPerCamera * commonArgs.mNumCameras - 1;
-    if (tileIndex > maxTileIndex) {
+    if (globalTileId > (args.mNumTilesPerCamera * commonArgs.mNumCameras - 1)) {
         return; // Invalid tile, exit early
     }
     
@@ -584,20 +555,31 @@ rasterizeGaussiansTileSparseForward(RasterizeTileSparseForwardArgs<ScalarType, N
     const uint32_t row = threadIdx.y;
     const uint32_t col = threadIdx.x;
     
-    // Bounds check for pixel coordinates
-    if (row >= commonArgs.mTileSize || col >= commonArgs.mTileSize) {
-        return; // Invalid pixel coordinates
+    // Use shared memory to read tile coordinates once per block instead of per thread
+    // This avoids redundant global memory reads (256 threads reading the same 2 values)
+    __shared__ uint32_t s_tileY, s_tileX;
+    
+    // Only thread (0,0) reads from global memory
+    if (threadIdx.x == 0 && threadIdx.y == 0) {
+        auto tileCoords = args.mTilesToRender[globalTileId];
+        s_tileY = tileCoords[0]; // [0, TH - 1]
+        s_tileX = tileCoords[1]; // [0, TW - 1]
     }
+    __syncthreads();
+    
+    // All threads use the shared values
+    const uint32_t tileY = s_tileY;
+    const uint32_t tileX = s_tileX;
 
     // Get the Gaussian range for this tile using sparse offsets
-    const auto [firstGaussianId, lastGaussianId] = args.tileGaussianRangeSparse(tileIndex);
+    const auto [firstGaussianId, lastGaussianId] = args.tileGaussianRangeSparse(globalTileId);
     
     // Check if this tile has any Gaussians
     if (firstGaussianId >= lastGaussianId) {
         // No Gaussians for this tile, write background/default values
-        args.writeAlpha(cameraId, tileId, row, col, 0.0f);
-        args.writeLastId(cameraId, tileId, row, col, -1);
-        args.writeFeatures(cameraId, tileId, row, col, [&](uint32_t k) {
+        args.writeAlpha(cameraId, localTileId, row, col, 0.0f);
+        args.writeLastId(cameraId, localTileId, row, col, -1);
+        args.writeFeatures(cameraId, localTileId, row, col, [&](uint32_t k) {
             return commonArgs.mHasBackgrounds ? commonArgs.mBackgrounds[cameraId][k] : 0.0f;
         });
         return;
@@ -606,8 +588,9 @@ rasterizeGaussiansTileSparseForward(RasterizeTileSparseForwardArgs<ScalarType, N
     // Volume render this pixel
     const uint32_t blockSize = blockDim.x * blockDim.y; // tileSize * tileSize
     args.volumeRenderTileForward(cameraId,
-                                 tileId,
-                                 tileIndex,
+                                 localTileId,
+                                 tileY,
+                                 tileX,
                                  row,
                                  col,
                                  firstGaussianId,
@@ -765,10 +748,10 @@ launchRasterizeTileSparseForwardKernel(
     const uint32_t imageOriginH,
     const uint32_t tileSize,
     // intersections
-    const torch::Tensor &tileOffsets,     // [C * T + 1]
+    const torch::Tensor &tileOffsetsSparse,     // [C * T + 1]
     const torch::Tensor &tileGaussianIds, // [n_isects]
     const uint32_t numTilesPerCamera,
-    const torch::Tensor &activeTiles      // [C * T]
+    const torch::Tensor &tilesToRender      // [C * T, 2]
 ) {
     const at::cuda::OptionalCUDAGuard device_guard(device_of(means2d));
     
@@ -783,6 +766,11 @@ launchRasterizeTileSparseForwardKernel(
     auto outAlphas   = torch::zeros({C, numTilesPerCamera, tileSize, tileSize, 1}, means2d.options().dtype(torch::kFloat32));
     auto outLastIds  = torch::zeros({C, numTilesPerCamera, tileSize, tileSize}, means2d.options().dtype(torch::kInt32));
 
+    torch::Tensor tileOffsets = torch::zeros({means2d.size(0), 
+        static_cast<int64_t>((imageHeight + tileSize - 1) / tileSize),
+        static_cast<int64_t>((imageWidth + tileSize - 1) / tileSize)},
+       tileOffsetsSparse.options().dtype(torch::kInt32));
+    
     // std::cout<<"creating args"<<std::endl;
     // Convert activeTiles to int32_t if needed (commonArgs expects int32_t)
     // torch::Tensor activeTilesInt32 = activeTiles.dtype() == torch::kInt32 
@@ -802,10 +790,11 @@ launchRasterizeTileSparseForwardKernel(
         imageOriginW,
         imageOriginH,
         tileSize,
-        tileOffsets,        // [C * T + 1] sparse offsets
+        tileOffsets,
+        tileOffsetsSparse,        // [C * T + 1] sparse offsets
         tileGaussianIds,
         numTilesPerCamera,
-        activeTiles,   // [C * T], UInt32
+        tilesToRender,   // [C * T, 2]
         outFeatures,
         outAlphas,
         outLastIds);
@@ -827,7 +816,7 @@ launchRasterizeTileSparseForwardKernel(
     
     // Grid: [C, T, 1] - one block per (camera, tile) pair
     // Block: tileSize x tileSize threads (one thread per pixel in tile)
-    const dim3 gridDim(C, numTilesPerCamera, 1);
+    const dim3 gridDim(C * numTilesPerCamera, 1, 1);
     const dim3 blockDim(tileSize, tileSize, 1);
     
     rasterizeGaussiansTileSparseForward<<<gridDim, blockDim, sharedMem, stream>>>(args);
@@ -1365,7 +1354,7 @@ dispatchGaussianTileSparseRasterizeForward<torch::kCUDA>(
     const torch::Tensor &tileOffsets,
     const torch::Tensor &tileGaussianIds,
     const uint32_t numTilesPerCamera,
-    const torch::Tensor &activeTiles,
+    const torch::Tensor &tilesToRender,
     const at::optional<torch::Tensor> &backgrounds
 ){
     FVDB_FUNC_RANGE();
@@ -1394,7 +1383,7 @@ dispatchGaussianTileSparseRasterizeForward<torch::kCUDA>(
                                                               tileOffsets,                      \
                                                               tileGaussianIds,                  \
                                                               numTilesPerCamera,                  \
-                                                              activeTiles);               \
+                                                              tilesToRender);               \
         return std::make_tuple(outFeatures, outAlphas, outLastIds);    \
     }
 
